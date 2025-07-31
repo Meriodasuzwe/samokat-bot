@@ -32,17 +32,17 @@ logger = logging.getLogger(__name__)
 # ==== ЗАГРУЗКА ТОКЕНА И НАСТРОЕК ====
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")  # токен из Railway
-ADMIN_ID = 5092137530           # твой Telegram ID
-CHANNEL_ID = "@SamokatControlAstana"     # канал для публикации жалоб
+# Список админов
+ADMIN_IDS = [5092137530, 570326525]  # добавил второго админа
+CHANNEL_ID = "@SamokatControlAstana"  # канал для публикации жалоб
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-# Читаем JSON из переменной окружения GOOGLE_CREDENTIALS
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
 gc = gspread.authorize(creds)
-sheet = gc.open("Samokat Complaints").sheet1  # название таблицы
+sheet = gc.open("Samokat Complaints").sheet1
 
 # ==== Этапы FSM ====
 MENU, OPERATOR, LOCATION, MEDIA = range(4)
@@ -163,11 +163,14 @@ async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{msg_id}")]
     ])
     text = f"Новая жалоба от @{username}\n🛴 {context.user_data['operator']} // {context.user_data['location']}"
-    await context.bot.send_message(ADMIN_ID, text, reply_markup=kb)
-    if update.message.photo:
-        await context.bot.send_photo(ADMIN_ID, media)
-    else:
-        await context.bot.send_video(ADMIN_ID, media)
+
+    # Отправляем всем админам
+    for admin in ADMIN_IDS:
+        await context.bot.send_message(admin, text, reply_markup=kb)
+        if update.message.photo:
+            await context.bot.send_photo(admin, media)
+        else:
+            await context.bot.send_video(admin, media)
 
     await update.message.reply_text(
         "✅ Жалоба отправлена. Ожидайте подтверждения.",
@@ -177,6 +180,13 @@ async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
+
+    # Проверяем, что подтверждает админ
+    if user_id not in ADMIN_IDS:
+        await query.answer("❌ У вас нет прав подтверждать жалобы.", show_alert=True)
+        return
+
     await query.answer()
     if not query.data.startswith("confirm:"):
         return
