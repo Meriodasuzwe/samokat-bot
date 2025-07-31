@@ -3,7 +3,7 @@ import pprint
 import os
 import json
 import sys
-from datetime import datetime
+import time
 
 from dotenv import load_dotenv
 from telegram import (
@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
 # ==== ЛОГИ ====
 logging.basicConfig(
@@ -42,7 +43,7 @@ gc = gspread.authorize(creds)
 sheet = gc.open("Samokat Complaints").sheet1
 
 # ==== Этапы FSM ====
-MENU, OPERATOR, LOCATION, MEDIA, REJECT_REASON = range(5)
+MENU, OPERATOR, LOCATION, MEDIA = range(4)
 
 # ==== Клавиатуры ====
 main_menu = ReplyKeyboardMarkup(
@@ -65,8 +66,9 @@ after_report_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Хранилище жалоб
+# Хранилище жалоб для модерации
 pending = {}
+reject_waiting = {}  # сюда кладём жалобы, для которых ждём текст причины
 
 # ==== ОБРАБОТЧИКИ ====
 
@@ -92,7 +94,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = sum(1 for r in data if r["User"] == user.username or r["User"] == user.first_name)
 
         profile_text = (
-            f"👤 Профиль (анонимно)\n"
+            f"👤 Профиль @{user.username or user.first_name}\n"
             f"Жалоб отправлено: {count}\n"
             f"Вознаграждение: в процессе разработки"
         )
@@ -134,7 +136,7 @@ async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         context.user_data["location"] = update.message.text
 
-    await update.message.reply_text("📸 Отправьте фото или видео нарушения и добавьте описание в подписи:")
+    await update.message.reply_text("📸 Отправьте фото или видео нарушения:")
     return MEDIA
 
 async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,33 +144,28 @@ async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         media = update.message.photo[-1].file_id if update.message.photo else update.message.video.file_id
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        username = user.username or user.first_name
 
-        description = update.message.caption if update.message.caption else "Без описания"
-
-        row = [now, "аноним", context.user_data["operator"], context.user_data["location"], media, "ожидает", description]
+        row = [now, username, context.user_data["operator"], context.user_data["location"], media, "ожидает", ""]
         sheet.append_row(row)
 
         msg_id = update.message.message_id
         pending[msg_id] = {
             "user_id": user.id,
+            "username": username,
             "operator": context.user_data["operator"],
             "location": context.user_data["location"],
             "media": media,
-            "media_type": "photo" if update.message.photo else "video",
-            "description": description
+            "media_type": "photo" if update.message.photo else "video"
         }
 
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{msg_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{msg_id}")
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_confirm:{msg_id}")
             ]
         ])
-        text = (
-            f"Новая жалоба\n"
-            f"🛴 {context.user_data['operator']} // {context.user_data['location']}\n"
-            f"Описание: {description}"
-        )
+        text = f"Новая жалоба\n🛴 {context.user_data['operator']} // {context.user_data['location']}"
 
         for admin in ADMIN_IDS:
             await context.bot.send_message(admin, text, reply_markup=kb)
@@ -187,6 +184,7 @@ async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Произошла ошибка при отправке жалобы.")
         return MENU
 
+# === ПОДТВЕРЖДЕНИЕ ===
 async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -196,60 +194,95 @@ async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
-
-    data = query.data.split(":")
-    action = data[0]
-    msg_id = int(data[1])
-
+    if not query.data.startswith("confirm:"):
+        return
+    msg_id = int(query.data.split(":")[1])
     comp = pending.pop(msg_id, None)
     if not comp:
         await query.edit_message_text("❗️ Жалоба уже обработана.")
         return
 
     rows = sheet.get_all_values()
-
     for i, row in enumerate(rows, start=1):
         if row[4] == comp["media"]:
-            if action == "confirm":
-                sheet.update_cell(i, 6, "подтверждено")
-
-                caption = (
-                    f"🚨 Подтверждённая жалоба\n"
-                    f"🛴 {comp['operator']}\n"
-                    f"📍 {comp['location']}\n"
-                    f"Описание: {comp['description']}"
-                )
-                if comp["media_type"] == "photo":
-                    await context.bot.send_photo(CHANNEL_ID, comp["media"], caption=caption)
-                else:
-                    await context.bot.send_video(CHANNEL_ID, comp["media"], caption=caption)
-
-                await context.bot.send_message(comp["user_id"], "✅ Ваша жалоба подтверждена и отправлена!")
-                await query.edit_message_text("✅ Жалоба подтверждена и опубликована.")
-
-            elif action == "reject":
-                sheet.update_cell(i, 6, "отклонено")
-                context.user_data["reject_row"] = i
-                context.user_data["reject_user"] = comp["user_id"]
-
-                await query.edit_message_text("❌ Введите причину отклонения сообщением:")
-                return REJECT_REASON  # <-- ВАЖНО
+            sheet.update_cell(i, 6, "подтверждено")
             break
 
-async def reject_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reason = update.message.text
-    row_num = context.user_data.get("reject_row")
-    user_id = context.user_data.get("reject_user")
-
-    if row_num and reason:
-        sheet.update_cell(row_num, 7, reason)  # колонка Description
-        await context.bot.send_message(user_id, f"❌ Ваша жалоба отклонена.\nПричина: {reason}")
-        await update.message.reply_text("Жалоба отклонена и причина сохранена.")
+    caption = f"🚨 Подтверждённая жалоба\n🛴 {comp['operator']}\n📍 {comp['location']}"
+    if comp["media_type"] == "photo":
+        await context.bot.send_photo(CHANNEL_ID, comp["media"], caption=caption)
     else:
-        await update.message.reply_text("Ошибка: не удалось сохранить причину.")
+        await context.bot.send_video(CHANNEL_ID, comp["media"], caption=caption)
 
+    await context.bot.send_message(comp["user_id"], "✅ Ваша жалоба подтверждена и отправлена!")
+    await query.edit_message_text("✅ Жалоба подтверждена и опубликована.")
     return MENU
 
+# === ОТКЛОНЕНИЕ (ШАГ 1 — подтверждение) ===
+async def reject_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.answer("❌ У вас нет прав отклонять жалобы.", show_alert=True)
+        return
+
+    await query.answer()
+
+    msg_id = int(query.data.split(":")[1])
+    comp = pending.get(msg_id)
+    if not comp:
+        await query.edit_message_text("❗️ Жалоба уже обработана.")
+        return
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Да", callback_data=f"reject_yes:{msg_id}"),
+            InlineKeyboardButton("Нет", callback_data=f"reject_no")
+        ]
+    ])
+    await query.edit_message_text("Вы уверены, что хотите отклонить жалобу?", reply_markup=kb)
+
+# === ОТКЛОНЕНИЕ (ШАГ 2 — подтвердили) ===
+async def reject_yes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    msg_id = int(query.data.split(":")[1])
+    comp = pending.get(msg_id)
+    if not comp:
+        await query.edit_message_text("❗️ Жалоба уже обработана.")
+        return
+
+    reject_waiting[user_id] = msg_id
+    await context.bot.send_message(user_id, "❌ Введите причину отклонения сообщением:")
+
+# === ОТКЛОНЕНИЕ (ШАГ 3 — ввод причины) ===
+async def reject_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in reject_waiting:
+        return
+
+    reason = update.message.text
+    msg_id = reject_waiting.pop(user_id)
+    comp = pending.pop(msg_id, None)
+    if not comp:
+        await update.message.reply_text("❗️ Жалоба уже обработана.")
+        return
+
+    # Обновляем статус и комментарий в Google Sheets
+    rows = sheet.get_all_values()
+    for i, row in enumerate(rows, start=1):
+        if row[4] == comp["media"]:
+            sheet.update_cell(i, 6, "отклонено")
+            sheet.update_cell(i, 7, reason)
+            break
+
+    await context.bot.send_message(comp["user_id"], f"❌ Ваша жалоба отклонена.\nПричина: {reason}")
+    await update.message.reply_text("Жалоба отклонена и причина сохранена.")
+
+# === СБРОС ===
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.", reply_markup=main_menu)
     return MENU
@@ -271,7 +304,6 @@ conv = ConversationHandler(
         OPERATOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_operator)],
         LOCATION: [MessageHandler((filters.TEXT | filters.LOCATION) & ~filters.COMMAND, get_location)],
         MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO, get_media)],
-        REJECT_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, reject_reason_handler)],
     },
     fallbacks=[
         CommandHandler("cancel", cancel),
@@ -280,8 +312,10 @@ conv = ConversationHandler(
 )
 
 app.add_handler(conv)
-app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^(confirm|reject):"))
-app.add_handler(CommandHandler("reset", reset))
+app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^confirm:"))
+app.add_handler(CallbackQueryHandler(reject_confirm_handler, pattern="^reject_confirm:"))
+app.add_handler(CallbackQueryHandler(reject_yes_handler, pattern="^reject_yes:"))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reject_reason_handler))
 app.add_error_handler(error_handler)
 
 if __name__ == "__main__":
