@@ -1,6 +1,7 @@
 import logging
 import pprint
 import os
+
 from dotenv import load_dotenv
 
 from telegram import (
@@ -23,9 +24,15 @@ CHANNEL_ID = -1002864245674     # канал для публикации жал�
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+
+# Читаем JSON из переменной окружения GOOGLE_CREDENTIALS
+import json
+creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))  # строка с JSON из Railway
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
+
 gc = gspread.authorize(creds)
-sheet = gc.open("Samokat Complaints").sheet1  # название таблицы
+sheet = gc.open("Samokat Complaints").sheet1  # название твоей Google-таблицы
+
 
 # ==== Этапы FSM ====
 MENU, OPERATOR, LOCATION, MEDIA = range(4)
