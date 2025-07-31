@@ -216,7 +216,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.", reply_markup=main_menu)
     return MENU
 
-# ==== ЗАПУСК С АВТОРЕСТАРТОМ ====
+# ==== ЗАПУСК ====
 app = ApplicationBuilder().token(TOKEN).build()
 
 conv = ConversationHandler(
@@ -233,10 +233,7 @@ conv = ConversationHandler(
 app.add_handler(conv)
 app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^confirm:"))
 
-while True:
-    try:
-        print("🤖 Бот запущен.")
-        app.run_polling()
-    except Exception as e:
-        logger.error(f"Бот упал с ошибкой: {e}")
-        time.sleep(5)
+# 👇 Стабильный запуск
+if __name__ == "__main__":
+    print("🤖 Бот запущен.")
+    app.run_polling()
