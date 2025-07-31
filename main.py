@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")  # токен из Railway
 ADMIN_ID = 5092137530           # твой Telegram ID
-CHANNEL_ID = -1002864245674     # канал для публикации жалоб
+CHANNEL_ID = "@SamokatControlAstana"     # канал для публикации жалоб
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
