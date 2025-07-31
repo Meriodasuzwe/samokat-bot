@@ -3,7 +3,6 @@ import pprint
 import os
 import json
 import sys
-import time
 
 from dotenv import load_dotenv
 from telegram import (
@@ -43,7 +42,7 @@ gc = gspread.authorize(creds)
 sheet = gc.open("Samokat Complaints").sheet1
 
 # ==== Этапы FSM ====
-MENU, OPERATOR, LOCATION, MEDIA = range(4)
+MENU, OPERATOR, LOCATION, MEDIA, DESCRIPTION = range(5)
 
 # ==== Клавиатуры ====
 main_menu = ReplyKeyboardMarkup(
@@ -92,7 +91,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = sum(1 for r in data if r["User"] == user.username or r["User"] == user.first_name)
 
         profile_text = (
-            f"👤 Профиль @{user.username or user.first_name}\n"
+            f"👤 Профиль\n"
             f"Жалоб отправлено: {count}\n"
             f"Вознаграждение: в процессе разработки"
         )
@@ -141,46 +140,63 @@ async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MEDIA
 
 async def get_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        media = update.message.photo[-1].file_id if update.message.photo else update.message.video.file_id
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        username = user.username or user.first_name
+    # Сохраняем файл и переходим к описанию
+    media = update.message.photo[-1].file_id if update.message.photo else update.message.video.file_id
+    context.user_data["media"] = media
+    context.user_data["media_type"] = "photo" if update.message.photo else "video"
 
-        row = [now, username, context.user_data["operator"], context.user_data["location"], media, "ожидает"]
-        sheet.append_row(row)
+    await update.message.reply_text("📝 Опишите проблему (например: «Самокат мешает проходу»):")
+    return DESCRIPTION
 
-        msg_id = update.message.message_id
-        pending[msg_id] = {
-            "user_id": user.id,
-            "username": username,
-            "operator": context.user_data["operator"],
-            "location": context.user_data["location"],
-            "media": media,
-            "media_type": "photo" if update.message.photo else "video"
-        }
+async def get_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    description = update.message.text
+    user = update.effective_user
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{msg_id}")]
-        ])
-        text = f"Новая жалоба от @{username}\n🛴 {context.user_data['operator']} // {context.user_data['location']}"
+    # Сохраняем в таблицу без username
+    row = [
+        now,
+        "аноним",  # вместо имени
+        context.user_data["operator"],
+        context.user_data["location"],
+        context.user_data["media"],
+        "ожидает",
+        description
+    ]
+    sheet.append_row(row)
 
-        for admin in ADMIN_IDS:
-            await context.bot.send_message(admin, text, reply_markup=kb)
-            if update.message.photo:
-                await context.bot.send_photo(admin, media)
-            else:
-                await context.bot.send_video(admin, media)
+    msg_id = update.message.message_id
+    pending[msg_id] = {
+        "user_id": user.id,
+        "operator": context.user_data["operator"],
+        "location": context.user_data["location"],
+        "media": context.user_data["media"],
+        "media_type": context.user_data["media_type"],
+        "description": description
+    }
 
-        await update.message.reply_text(
-            "✅ Жалоба отправлена. Ожидайте подтверждения.",
-            reply_markup=after_report_kb
-        )
-        return MENU
-    except Exception as e:
-        logger.exception("Ошибка при загрузке медиа")
-        await update.message.reply_text("❌ Произошла ошибка при отправке жалобы.")
-        return MENU
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{msg_id}")]
+    ])
+    text = (
+        f"Новая жалоба\n"
+        f"🛴 {context.user_data['operator']} // {context.user_data['location']}\n"
+        f"Описание: {description}"
+    )
+
+    # Отправляем админам
+    for admin in ADMIN_IDS:
+        await context.bot.send_message(admin, text, reply_markup=kb)
+        if context.user_data["media_type"] == "photo":
+            await context.bot.send_photo(admin, context.user_data["media"])
+        else:
+            await context.bot.send_video(admin, context.user_data["media"])
+
+    await update.message.reply_text(
+        "✅ Жалоба отправлена. Ожидайте подтверждения.",
+        reply_markup=after_report_kb
+    )
+    return MENU
 
 async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -205,7 +221,10 @@ async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sheet.update_cell(i, 6, "подтверждено")
             break
 
-    caption = f"🚨 Подтверждённая жалоба\n🛴 {comp['operator']}\n📍 {comp['location']}\n👤 @{comp['username']}"
+    caption = (
+        f"🚨 Подтверждённая жалоба\n"
+        f"🛴 {comp['operator']}\n📍 {comp['location']}\nОписание: {comp['description']}"
+    )
     if comp["media_type"] == "photo":
         await context.bot.send_photo(CHANNEL_ID, comp["media"], caption=caption)
     else:
@@ -236,6 +255,7 @@ conv = ConversationHandler(
         OPERATOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_operator)],
         LOCATION: [MessageHandler((filters.TEXT | filters.LOCATION) & ~filters.COMMAND, get_location)],
         MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO, get_media)],
+        DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_description)],
     },
     fallbacks=[
         CommandHandler("cancel", cancel),
@@ -245,7 +265,6 @@ conv = ConversationHandler(
 
 app.add_handler(conv)
 app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^confirm:"))
-app.add_handler(CommandHandler("reset", reset))
 app.add_error_handler(error_handler)
 
 if __name__ == "__main__":
