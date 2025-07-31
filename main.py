@@ -1,9 +1,11 @@
 import logging
 import pprint
 import os
+import json
+import sys
+import time
 
 from dotenv import load_dotenv
-
 from telegram import (
     Update, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
@@ -16,9 +18,20 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
+# ==== ЛОГИ ====
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("railway.log")
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # ==== ЗАГРУЗКА ТОКЕНА И НАСТРОЕК ====
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")  # токен из .env
+TOKEN = os.getenv("BOT_TOKEN")  # токен из Railway
 ADMIN_ID = 5092137530           # твой Telegram ID
 CHANNEL_ID = -1002864245674     # канал для публикации жалоб
 
@@ -26,17 +39,13 @@ CHANNEL_ID = -1002864245674     # канал для публикации жал�
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 # Читаем JSON из переменной окружения GOOGLE_CREDENTIALS
-import json
-creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))  # строка с JSON из Railway
+creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-
 gc = gspread.authorize(creds)
-sheet = gc.open("Samokat Complaints").sheet1  # название твоей Google-таблицы
-
+sheet = gc.open("Samokat Complaints").sheet1  # название таблицы
 
 # ==== Этапы FSM ====
 MENU, OPERATOR, LOCATION, MEDIA = range(4)
-logging.basicConfig(level=logging.INFO)
 
 # ==== Клавиатуры ====
 main_menu = ReplyKeyboardMarkup(
@@ -197,7 +206,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.", reply_markup=main_menu)
     return MENU
 
-# ==== ЗАПУСК ====
+# ==== ЗАПУСК С АВТОРЕСТАРТОМ ====
 app = ApplicationBuilder().token(TOKEN).build()
 
 conv = ConversationHandler(
@@ -213,5 +222,11 @@ conv = ConversationHandler(
 
 app.add_handler(conv)
 app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^confirm:"))
-print("🤖 Бот запущен.")
-app.run_polling()
+
+while True:
+    try:
+        print("🤖 Бот запущен.")
+        app.run_polling()
+    except Exception as e:
+        logger.error(f"Бот упал с ошибкой: {e}")
+        time.sleep(5)
